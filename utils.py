@@ -1,10 +1,10 @@
+import cv2
 import matplotlib.pyplot as plt
-from pytorch_lightning import seed_everything
+import numpy as np
 import torch
 import torch.nn.functional as F
 import torchvision.transforms.functional as TF
-import cv2
-import numpy as np
+from pytorch_lightning import seed_everything
 from sklearn.decomposition import PCA
 
 
@@ -24,6 +24,7 @@ def remove_axes(axes):
         for ax in axes:
             _remove_axes(ax)
 
+
 def pca(image_feats_list, dim=3, fit_pca=None, use_torch_pca=True, max_samples=None):
     device = image_feats_list[0].device
 
@@ -33,7 +34,13 @@ def pca(image_feats_list, dim=3, fit_pca=None, use_torch_pca=True, max_samples=N
         if target_size is not None and fit_pca is None:
             tensor = F.interpolate(tensor, (target_size, target_size), mode="bilinear")
         B, C, H, W = tensor.shape
-        return tensor.permute(1, 0, 2, 3).reshape(C, B * H * W).permute(1, 0).detach().cpu()
+        return (
+            tensor.permute(1, 0, 2, 3)
+            .reshape(C, B * H * W)
+            .permute(1, 0)
+            .detach()
+            .cpu()
+        )
 
     if len(image_feats_list) > 1 and fit_pca is None:
         if len(image_feats_list[0].shape) == 2:
@@ -67,15 +74,18 @@ def pca(image_feats_list, dim=3, fit_pca=None, use_torch_pca=True, max_samples=N
         x_red -= x_red.min(dim=0, keepdim=True).values
         x_red /= x_red.max(dim=0, keepdim=True).values
         if len(feats.shape) == 2:
-            reduced_feats.append(x_red) # 1D
+            reduced_feats.append(x_red)  # 1D
         else:
             B, C, H, W = feats.shape
-            reduced_feats.append(x_red.reshape(B, H, W, dim).permute(0, 3, 1, 2).to(device)) # 3D
+            reduced_feats.append(
+                x_red.reshape(B, H, W, dim).permute(0, 3, 1, 2).to(device)
+            )  # 3D
 
     return reduced_feats, fit_pca
 
+
 @torch.no_grad()
-def plot_feats(image, lr, hr, save_name='feats.png'):
+def plot_feats(image, lr, hr, save_name="feats.png"):
     assert len(image.shape) == len(lr.shape) == len(hr.shape) == 3
     seed_everything(0)
     [lr_feats_pca, hr_feats_pca], _ = pca([lr.unsqueeze(0), hr.unsqueeze(0)])
@@ -87,13 +97,16 @@ def plot_feats(image, lr, hr, save_name='feats.png'):
     ax[2].imshow(hr_feats_pca[0].permute(1, 2, 0).detach().cpu())
     ax[2].set_title("Upsampled Features")
     remove_axes(ax)
-    plt.savefig(save_name, bbox_inches='tight', pad_inches=0.1)
+    plt.savefig(save_name, bbox_inches="tight", pad_inches=0.1)
+
 
 class ToTensorWithoutScaling:
     """Convert PIL image or numpy array to a PyTorch tensor without scaling the values."""
+
     def __call__(self, pic):
         # Convert the PIL Image or numpy array to a tensor (without scaling).
         return TF.pil_to_tensor(pic).long()
+
 
 def prep_image(t, subtract_min=True):
     """Prepare tensor for image visualization by normalizing and converting to uint8."""
@@ -109,14 +122,15 @@ def prep_image(t, subtract_min=True):
 
 
 class TorchPCA(object):
-
     def __init__(self, n_components):
         self.n_components = n_components
 
     def fit(self, X):
         self.mean_ = X.mean(dim=0)
         unbiased = X - self.mean_.unsqueeze(0)
-        U, S, V = torch.pca_lowrank(unbiased, q=self.n_components, center=False, niter=4)
+        U, S, V = torch.pca_lowrank(
+            unbiased, q=self.n_components, center=False, niter=4
+        )
         self.components_ = V.T
         self.singular_values_ = S
         return self
@@ -184,11 +198,21 @@ ADE20K_150_CATEGORIES = [
     {"color": [140, 140, 140], "id": 48, "isthing": 0, "name": "skyscraper"},
     {"color": [250, 10, 15], "id": 49, "isthing": 1, "name": "fireplace"},
     {"color": [20, 255, 0], "id": 50, "isthing": 1, "name": "refrigerator, icebox"},
-    {"color": [31, 255, 0], "id": 51, "isthing": 0, "name": "grandstand, covered stand"},
+    {
+        "color": [31, 255, 0],
+        "id": 51,
+        "isthing": 0,
+        "name": "grandstand, covered stand",
+    },
     {"color": [255, 31, 0], "id": 52, "isthing": 0, "name": "path"},
     {"color": [255, 224, 0], "id": 53, "isthing": 1, "name": "stairs"},
     {"color": [153, 255, 0], "id": 54, "isthing": 0, "name": "runway"},
-    {"color": [0, 0, 255], "id": 55, "isthing": 1, "name": "case, display case, showcase, vitrine"},
+    {
+        "color": [0, 0, 255],
+        "id": 55,
+        "isthing": 1,
+        "name": "case, display case, showcase, vitrine",
+    },
     {
         "color": [255, 71, 0],
         "id": 56,
@@ -222,14 +246,24 @@ ADE20K_150_CATEGORIES = [
     {"color": [173, 255, 0], "id": 76, "isthing": 1, "name": "boat"},
     {"color": [0, 255, 153], "id": 77, "isthing": 0, "name": "bar"},
     {"color": [255, 92, 0], "id": 78, "isthing": 1, "name": "arcade machine"},
-    {"color": [255, 0, 255], "id": 79, "isthing": 0, "name": "hovel, hut, hutch, shack, shanty"},
+    {
+        "color": [255, 0, 255],
+        "id": 79,
+        "isthing": 0,
+        "name": "hovel, hut, hutch, shack, shanty",
+    },
     {"color": [255, 0, 245], "id": 80, "isthing": 1, "name": "bus"},
     {"color": [255, 0, 102], "id": 81, "isthing": 1, "name": "towel"},
     {"color": [255, 173, 0], "id": 82, "isthing": 1, "name": "light"},
     {"color": [255, 0, 20], "id": 83, "isthing": 1, "name": "truck"},
     {"color": [255, 184, 184], "id": 84, "isthing": 0, "name": "tower"},
     {"color": [0, 31, 255], "id": 85, "isthing": 1, "name": "chandelier"},
-    {"color": [0, 255, 61], "id": 86, "isthing": 1, "name": "awning, sunshade, sunblind"},
+    {
+        "color": [0, 255, 61],
+        "id": 86,
+        "isthing": 1,
+        "name": "awning, sunshade, sunblind",
+    },
     {"color": [0, 71, 255], "id": 87, "isthing": 1, "name": "street lamp"},
     {"color": [255, 0, 204], "id": 88, "isthing": 1, "name": "booth"},
     {"color": [0, 255, 194], "id": 89, "isthing": 1, "name": "tv"},
@@ -257,7 +291,12 @@ ADE20K_150_CATEGORIES = [
         "name": "ottoman, pouf, pouffe, puff, hassock",
     },
     {"color": [0, 255, 10], "id": 98, "isthing": 1, "name": "bottle"},
-    {"color": [255, 112, 0], "id": 99, "isthing": 0, "name": "buffet, counter, sideboard"},
+    {
+        "color": [255, 112, 0],
+        "id": 99,
+        "isthing": 0,
+        "name": "buffet, counter, sideboard",
+    },
     {
         "color": [143, 255, 0],
         "id": 100,
@@ -334,16 +373,17 @@ def adjust_features_with_masks(hr_feats, binary_masks, alpha=0.8):
     Args:
         hr_feats (torch.Tensor): High-resolution features of shape (B, C, H, W).
         binary_masks (torch.Tensor): Binary masks of shape (B, N, H, W).
-        alpha (float): Adjustment factor (0 < alpha <= 1). Controls how much 
+        alpha (float): Adjustment factor (0 < alpha <= 1). Controls how much
                        the features are moved towards the mean.
 
     Returns:
         torch.Tensor: Adjusted HR features of shape (B, C, H, W).
     """
+
     def _adjust_features_with_masks(features, masks, alpha, N):
         C, H, W = features.shape
         adjusted_features = features.clone()
-        
+
         for i in range(N):  # Iterate over each mask
             mask = masks[i]  # Extract mask of shape (H, W)
             mask_indices = mask > 0  # Boolean mask indicating the region of interest
@@ -351,15 +391,19 @@ def adjust_features_with_masks(hr_feats, binary_masks, alpha=0.8):
             if mask_indices.sum() == 0:
                 # Skip if the mask is empty
                 continue
-                
+
             # Extract features within the mask
-            features_in_mask = adjusted_features[:, mask_indices]  # Shape: (C, num_mask_pixels)
+            features_in_mask = adjusted_features[
+                :, mask_indices
+            ]  # Shape: (C, num_mask_pixels)
 
             # Compute the mean feature vector for the mask
             mean_feature = features_in_mask.mean(dim=1, keepdim=True)  # Shape: (C, 1)
 
             # Adjust features by moving them closer to the mean
-            adjust_features_in_mask = features_in_mask * (1 - alpha) + mean_feature * alpha
+            adjust_features_in_mask = (
+                features_in_mask * (1 - alpha) + mean_feature * alpha
+            )
 
             # Update the adjusted features back into the HR feature map
             adjusted_features[:, mask_indices] = adjust_features_in_mask
@@ -373,7 +417,7 @@ def adjust_features_with_masks(hr_feats, binary_masks, alpha=0.8):
         adjusted_feats[b] = _adjust_features_with_masks(
             adjusted_feats[b], binary_masks[b], alpha, N
         )
-    
+
     return adjusted_feats
 
 
@@ -404,13 +448,17 @@ def mask_feature_similarity_loss(hr_feats, binary_masks):
                 continue
 
             # Extract features within the mask
-            features_in_mask = hr_feats[b, :, mask_indices]  # Shape: (C, num_mask_pixels)
+            features_in_mask = hr_feats[
+                b, :, mask_indices
+            ]  # Shape: (C, num_mask_pixels)
 
             # Compute the mean feature vector within the mask
             mean_feature = features_in_mask.mean(dim=1, keepdim=True)  # Shape: (C, 1)
 
             # Compute the squared deviation of features from the mean
-            loss = ((features_in_mask - mean_feature) ** 2).mean()  # Scalar loss for this mask
+            loss = (
+                (features_in_mask - mean_feature) ** 2
+            ).mean()  # Scalar loss for this mask
 
             # Accumulate the loss
             total_loss += loss

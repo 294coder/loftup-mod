@@ -10,7 +10,6 @@ import random
 import torch
 import torch.nn.functional as F
 import torchvision.transforms.functional as TF
-from ema import EMA
 
 
 class ScaleNet(torch.nn.Module):
@@ -268,3 +267,112 @@ def get_kernel_size(model_type):
         return 14
     else:
         return 16
+
+
+#############  SAM mask utilities
+
+
+def adjust_features_with_masks(hr_feats, binary_masks, alpha=0.8):
+    """
+    Adjusts high-resolution (HR) features such that vectors within each mask area
+    are closer to their mean without destroying semantics.
+
+    Args:
+        hr_feats (torch.Tensor): High-resolution features of shape (B, C, H, W).
+        binary_masks (torch.Tensor): Binary masks of shape (B, N, H, W).
+        alpha (float): Adjustment factor (0 < alpha <= 1). Controls how much
+                       the features are moved towards the mean.
+
+    Returns:
+        torch.Tensor: Adjusted HR features of shape (B, C, H, W).
+    """
+
+    def _adjust_features_with_masks(features, masks, alpha, N):
+        C, H, W = features.shape
+        adjusted_features = features.clone()
+
+        for i in range(N):  # Iterate over each mask
+            mask = masks[i]  # Extract mask of shape (H, W)
+            mask_indices = mask > 0  # Boolean mask indicating the region of interest
+
+            if mask_indices.sum() == 0:
+                # Skip if the mask is empty
+                continue
+
+            # Extract features within the mask
+            features_in_mask = adjusted_features[
+                :, mask_indices
+            ]  # Shape: (C, num_mask_pixels)
+
+            # Compute the mean feature vector for the mask
+            mean_feature = features_in_mask.mean(dim=1, keepdim=True)  # Shape: (C, 1)
+
+            # Adjust features by moving them closer to the mean
+            adjust_features_in_mask = (
+                features_in_mask * (1 - alpha) + mean_feature * alpha
+            )
+
+            # Update the adjusted features back into the HR feature map
+            adjusted_features[:, mask_indices] = adjust_features_in_mask
+        return adjusted_features
+
+    B, C, H, W = hr_feats.shape
+    N = binary_masks.shape[1]  # Number of masks
+    adjusted_feats = hr_feats.clone()  # Clone to preserve original features
+
+    for b in range(B):  # Iterate over each image in the batch
+        adjusted_feats[b] = _adjust_features_with_masks(
+            adjusted_feats[b], binary_masks[b], alpha, N
+        )
+
+    return adjusted_feats
+
+
+def mask_feature_similarity_loss(hr_feats, binary_masks):
+    """
+    Computes a regularization loss to encourage features within each mask region
+    to be closer to their mean.
+
+    Args:
+        hr_feats (torch.Tensor): High-resolution features of shape (B, C, H, W).
+        binary_masks (torch.Tensor): Binary masks of shape (B, N, H, W).
+
+    Returns:
+        torch.Tensor: Regularization loss (scalar).
+    """
+    B, C, H, W = hr_feats.shape
+    N = binary_masks.shape[1]  # Number of masks
+    total_loss = 0.0
+    num_valid_masks = 0  # Track the number of valid masks for normalization
+
+    for b in range(B):  # Iterate over each image in the batch
+        for n in range(N):  # Iterate over each mask
+            mask = binary_masks[b, n]  # Shape: (H, W)
+            mask_indices = mask > 0  # Boolean mask
+
+            if mask_indices.sum() == 0:
+                # Skip if the mask is empty
+                continue
+
+            # Extract features within the mask
+            features_in_mask = hr_feats[
+                b, :, mask_indices
+            ]  # Shape: (C, num_mask_pixels)
+
+            # Compute the mean feature vector within the mask
+            mean_feature = features_in_mask.mean(dim=1, keepdim=True)  # Shape: (C, 1)
+
+            # Compute the squared deviation of features from the mean
+            loss = (
+                (features_in_mask - mean_feature) ** 2
+            ).mean()  # Scalar loss for this mask
+
+            # Accumulate the loss
+            total_loss += loss
+            num_valid_masks += 1
+
+    # Normalize the total loss by the number of valid masks
+    if num_valid_masks > 0:
+        total_loss /= num_valid_masks
+
+    return total_loss
