@@ -8,6 +8,8 @@ from easydict import EasyDict as edict
 from torch import Tensor
 from transformers.modeling_outputs import ModelOutput
 
+from src.utilities.config_utils import function_config_to_easy_dict
+
 from ..upsamplers.upsamplers import (
     CATransformer,
     ChannelNorm,
@@ -46,30 +48,46 @@ class LoftUpStage1Output(ModelOutput):
     lr_aug_feats: Tensor | None = None
     hr_aug_feats: Tensor | None = None
     # Projected features
-    proj_hr_feats: Tensor | None = None
+    proj_hr_aug_feats: Tensor | None = None
     proj_downsampled_hr_feats: Tensor | None = None
     proj_lr_aug_feats: Tensor | None = None
 
 
-def loftup_augmentation(
-    img: Tensor, max_zoom=1.2, max_rotate=0.0, max_pad=0, *, params=None
-):
-    # Sample the augmentation parameters
-    if params is None:
-        params = sample_transform(
-            False,
-            0,
-            max_zoom,
-            h=img.shape[2],
-            w=img.shape[3],
-            max_rotation=max_rotate,
-        )
-    # Apply the augmentations
-    img = apply_jitter(img, max_pad, params)
-    return img, params
+class _AugmentationCollections:
+    _supported_augmentations = ["loftup"]
+
+    @classmethod
+    def __class_getitem__(cls, item):
+        assert item in cls._supported_augmentations, f"Unsupported augmentation: {item}"
+        return getattr(cls, item)
+
+    @classmethod
+    def loftup(
+        cls,
+        img: Tensor,
+        max_zoom=1.2,
+        max_rotate=0.0,
+        max_pad=0,
+        *,
+        params: tuple | None = None,
+    ):
+        # Sample the augmentation parameters
+        if params is None:
+            params = sample_transform(
+                False,
+                0,
+                max_zoom,
+                h=img.shape[2],
+                w=img.shape[3],
+                max_rotation=max_rotate,
+            )
+        # Apply the augmentations
+        img = apply_jitter(img, max_pad, params)
+        return img, params
 
 
 class LoftUpStage1Loss(nn.Module):
+    @function_config_to_easy_dict
     def __init__(
         self,
         featurizer: nn.Module,
@@ -85,7 +103,7 @@ class LoftUpStage1Loss(nn.Module):
         kernel_entropy_weight: float = 0.0,
         tv_weight: float = 0.0,
         # Augmentation
-        n_jitters: int = 4,
+        n_augs: int = 4,
         augmentation_kwargs: dict = {},
         # SAM specific
         sam_model: nn.Module | None = None,
@@ -113,8 +131,9 @@ class LoftUpStage1Loss(nn.Module):
         self.tv_weight = tv_weight
 
         # Augmentations
-        self.n_jitters = n_jitters
+        self.n_augs = n_augs
         self.augmentation_kwargs = augmentation_kwargs
+        self.augment_fn = _AugmentationCollections["loftup"]
 
         # SAM specific
         self.sam_mask_alpha = sam_mask_alpha
@@ -133,7 +152,7 @@ class LoftUpStage1Loss(nn.Module):
     def _forward_featurizer(self, x) -> Tensor:
         return self.featurizer(x)
 
-    def _resample_guidance_and_masks(self, img, binary_masks: Tensor | None = None):
+    def _resample_global_img_and_masks(self, img, binary_masks: Tensor | None = None):
         if self.multi_upsample_size:
             sample_size = random.choice(
                 [self.upsample_size // 4, self.upsample_size // 2, self.upsample_size]
@@ -142,7 +161,7 @@ class LoftUpStage1Loss(nn.Module):
             sample_size = self.upsample_size
 
         # Resample the image and masks
-        guidance_img = F.interpolate(
+        global_img = F.interpolate(
             img, size=(sample_size, sample_size), mode="bilinear", align_corners=False
         )
         if binary_masks is not None:
@@ -150,13 +169,13 @@ class LoftUpStage1Loss(nn.Module):
                 binary_masks, size=(sample_size, sample_size), mode="nearest"
             )
 
-        return guidance_img, binary_masks
+        return global_img, binary_masks
 
     def _resample_inputs(self, img: Tensor, binary_masks: Tensor | None = None):
         """Resample inputs to desired upsample size."""
         input_img_size: int = self.resampled_img_size  # TODO: this is desired?
 
-        guidance_img, binary_masks = self._resample_guidance_and_masks(
+        global_img, binary_masks = self._resample_global_img_and_masks(
             img, binary_masks
         )
 
@@ -167,8 +186,8 @@ class LoftUpStage1Loss(nn.Module):
             mode="bilinear",
             align_corners=False,
         )
-        guidance_img = F.interpolate(
-            guidance_img,
+        global_img = F.interpolate(
+            global_img,
             size=(input_img_size, input_img_size),
             mode="bilinear",
             align_corners=False,
@@ -177,22 +196,22 @@ class LoftUpStage1Loss(nn.Module):
             binary_masks = F.interpolate(
                 binary_masks, size=(input_img_size, input_img_size), mode="nearest"
             )
-        return img, guidance_img, binary_masks
+        return img, global_img, binary_masks
 
     def _get_lr_feature(self, img: Tensor):
         lr_feat = self._forward_featurizer(img)
         return lr_feat
 
-    def _ensure_img_equal_size(self, img1, img2):
-        if img1.shape[2] != img2.shape[2]:
-            img1 = F.interpolate(
-                img1,
-                size=img2.shape[2:],
-                mode="bilinear",
-                align_corners=False,
+    def _ensure_equal_size(self, interp_img, ref_img, mode="bilinear"):
+        if interp_img.shape[2] != ref_img.shape[2]:
+            interp_img = F.interpolate(
+                interp_img,
+                size=ref_img.shape[2:],
+                mode=mode,
+                align_corners=False if mode != "nearest" else None,
             )
 
-        return img1
+        return interp_img
 
     def _forward_sam_adjust_loss(
         self,
@@ -228,6 +247,7 @@ class LoftUpStage1Loss(nn.Module):
         sam_loss = mask_up_recon_loss
 
         # Mask regularization loss
+        # The features in one mask class are encouraged to be similar to their mean
         mask_reg_loss = self._zero
         if self.sam_mask_reg > 0.0:
             mask_reg_loss = (
@@ -249,41 +269,45 @@ class LoftUpStage1Loss(nn.Module):
     def _forward_augmentation_loss(
         self,
         lr_feats: Tensor,
-        img: Tensor,
-        guidance_img: Tensor,
+        hr_feats: Tensor | None,
+        orig_img: Tensor,
+        global_img: Tensor,
         binary_masks: Tensor | None,
         aug_index: int,
     ):
         # Upsample the un-augmented feature
-        hr_feats = self._forward_upsampler(lr_feats, guidance_img)
-        hr_feats = self._ensure_img_equal_size(hr_feats, img)
+        if hr_feats is None:
+            hr_feats = self._forward_upsampler(lr_feats, global_img)
+            hr_feats = self._ensure_equal_size(hr_feats, orig_img)
+        assert hr_feats.shape[2:] == orig_img.shape[2:], (
+            "HR features and guidance image must have the same spatial size."
+        )
 
         # Augment the image and then get augmented feature
-        aug_img, aug_params_ = loftup_augmentation(
-            guidance_img, **self.augmentation_kwargs
-        )
-        aug_img = self._ensure_img_equal_size(aug_img, guidance_img)
+        aug_img, aug_params_ = self.augment_fn(global_img, **self.augmentation_kwargs)
+        aug_img = self._ensure_equal_size(aug_img, global_img)
         lr_aug_feats = self._get_lr_feature(aug_img)
 
         # Random feature projection
         # Apply the same the projection to the HR features
         proj_matrix = create_random_projection(lr_feats, self.random_proj_dim)
-        hr_aug_feats, _ = loftup_augmentation(
+        hr_aug_feats, _ = self.augment_fn(
             hr_feats, params=aug_params_, **self.augmentation_kwargs
-        )[0]
-        hr_aug_feats = self._ensure_img_equal_size(hr_aug_feats, guidance_img)
+        )
+        hr_aug_feats = self._ensure_equal_size(hr_aug_feats, global_img)
 
         # Projection features to some smaller dimensions
         # Downsampled(proj(HR)) ~= proj(LR)
         # TODO: this projection is necessary?
-        proj_hr_feats = project(hr_aug_feats, proj_matrix)
-        dd_ds_hr_feats = self.downsampler(proj_hr_feats, aug_img)
+        proj_hr_aug_feats = project(hr_aug_feats, proj_matrix)
+        dd_ds_hr_feats = self.downsampler(proj_hr_aug_feats, aug_img)
         dd_lr_aug_feats = project(lr_aug_feats, proj_matrix)
         multi_view_loss = (dd_ds_hr_feats - dd_lr_aug_feats) ** 2
 
         # Reconstruction loss
         if self._pred_uncertainty:
             # has uncertainty estimation
+            assert self.uncertainty_net is not None, "Uncertainty net is not provided."
             uncentainty = self.uncertainty_net(lr_aug_feats)
             _eps = 1e-8
             uc_factor = 1 / ((2 * uncentainty**2) + _eps)
@@ -327,7 +351,7 @@ class LoftUpStage1Loss(nn.Module):
                 "lr_aug_feats": lr_aug_feats,
                 "hr_aug_feats": hr_aug_feats,
                 # Projected features
-                "proj_hr_feats": proj_hr_feats,  # Projected (down-dim) hr features
+                "proj_hr_aug_feats": proj_hr_aug_feats,  # Projected (down-dim) hr features
                 "proj_downsampled_hr_feats": dd_ds_hr_feats,  # Projected downsampled hr features
                 "proj_lr_aug_feats": dd_lr_aug_feats,  # Projected lr augmented features
             }
@@ -341,20 +365,21 @@ class LoftUpStage1Loss(nn.Module):
         # Resample inputs
         img, guidance_img, binary_masks = self._resample_inputs(img, binary_masks)
 
-        # For-loop the augmenation process
-        for aug_index in range(self.n_jitters):
-            # Get LR feature
-            lr_feats = self._get_lr_feature(img)
+        # Get LR feature
+        lr_feats = self._get_lr_feature(img)
 
+        # For-loop the augmenation process
+        for aug_index in range(self.n_augs):
             # Augmentation loss
             aug_loss_dict = self._forward_augmentation_loss(
                 lr_feats,
+                None,  # let the function compute hr_feats
                 img,
                 guidance_img,
                 binary_masks,
                 aug_index,
             )
-            total_loss = total_loss + aug_loss_dict.augmentation_loss
+            total_loss = total_loss + aug_loss_dict.augmentation_loss / self.n_augs
 
         # SAM adjustment loss
         if self._sam_model_online or binary_masks is None:
@@ -395,7 +420,7 @@ class LoftUpStage1Loss(nn.Module):
             lr_aug_feats=aug_loss_dict.lr_aug_feats,
             hr_aug_feats=aug_loss_dict.hr_aug_feats,
             # Projected features
-            proj_hr_feats=aug_loss_dict.proj_hr_feats,
+            proj_hr_aug_feats=aug_loss_dict.proj_hr_aug_feats,
             proj_downsampled_hr_feats=aug_loss_dict.proj_downsampled_hr_feats,
             proj_lr_aug_feats=aug_loss_dict.proj_lr_aug_feats,
         )

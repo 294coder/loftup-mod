@@ -177,7 +177,11 @@ def compute_affinity_matrix_batch(feature_map, alpha=0.1):
 
     Returns:
         affinity_matrix_batch: Affinity matrix of shape (b, selected_region_size, selected_region_size)
+
+    NOTE:
+        this is more like a Gram loss.
     """
+
     # Feature map shape: (b, c, h, w)
     b, c, h, w = feature_map.shape
 
@@ -270,6 +274,21 @@ def get_kernel_size(model_type):
 
 
 #############  SAM mask utilities
+
+
+def adjust_feature_with_logits(
+    hr_feats, mask_logits, alpha=0.8, feat_projector: torch.nn.Module | None = None
+):
+    """Mixture of hr_feats and mask logits
+    NOTE: this is exprimental.
+    """
+    if feat_projector is not None:
+        hr_feats = feat_projector(hr_feats)
+
+    assert hr_feats.shape == mask_logits.shape, "Shapes must match"
+
+    adjusted_feats = alpha * hr_feats + (1 - alpha) * mask_logits
+    return adjusted_feats
 
 
 def adjust_features_with_masks(hr_feats, binary_masks, alpha=0.8):
