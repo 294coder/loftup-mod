@@ -75,7 +75,7 @@ class LoftUpStage2Loss(LoftUpStage1Loss):
         final_feat_size=None,
         affinity_loss_type: str = "l1",
         # Augmentation
-        n_jitters: int = 4,
+        n_augs: int = 4,
         augmentation_kwargs: dict = {},
         # High-resolution supervision
         hr_res: int = 224,
@@ -93,7 +93,7 @@ class LoftUpStage2Loss(LoftUpStage1Loss):
         },
         # SAM specifics
         sam_model: nn.Module | None = None,
-        sam_mask_alpha: float = 0.8,
+        sam_mask_alpha: float = 0.0,
         sam_mask_reg: float = 0.0,
     ):
         super().__init__(
@@ -109,7 +109,7 @@ class LoftUpStage2Loss(LoftUpStage1Loss):
             clamp_featup=clamp_featup,
             kernel_entropy_weight=kernel_entropy_weight,
             tv_weight=tv_weight,
-            n_jitters=n_jitters,
+            n_augs=n_augs,
             augmentation_kwargs=augmentation_kwargs,
             sam_model=sam_model,
             sam_mask_alpha=sam_mask_alpha,
